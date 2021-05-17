@@ -1,0 +1,237 @@
+---
+- name: Setup a symfony server API
+  hosts: debianServer
+  remote_user: root
+
+  vars:
+    project_name: "sigils_go_brrr"
+    symfony_root_dir: "/var/www/{{ project_name }}"
+    symfony_web_dir: "{{ symfony_root_dir }}/web"
+    symfony_var_dir: "{{ symfony_root_dir }}/var"
+    symfony_console_path: "{{ symfony_root_dir }}/symfony/bin/"
+    final_user: thiback
+    final_user_password: password
+    db_user: pingouin
+    db_user_password: banquise
+    db_name: "{{ project_name }}"
+
+  pre_tasks:
+
+##### Check if target host has the good version of Linux
+    - name: Linux distro check
+      meta: end_host
+      when:
+      - ansible_distribution != 'Debian'
+#        msg: The target machine Linux distribution must be Debian 10.
+
+    - name: Debian major version check
+      meta: end_host
+      when:
+      - ansible_distribution_major_version != '10'
+#        msg: The target machine Linux distribution must be Debian 10.
+
+##### Install NTP to synchronize clock to current time
+
+    - name: Install NTP to synchronize the clocks
+      apt:
+        pkg: ntp
+        state: present
+
+    - name: enable NTP
+      service:
+        name: ntp
+        state: started
+        enabled: yes
+
+##### Updating existing packages to their latest version
+
+    - name: Update apt
+      apt:
+        cache_valid_time: 1800
+        update_cache: yes
+
+    - name: Upgrade installed packages
+      become: true
+      apt:
+        upgrade: safe
+
+
+  tasks:
+    - name: Install utilitary packages
+      apt: 
+        pkg: 
+          - apt-transport-https
+          - gnupg2
+          - gzip
+          - unzip
+          - zip
+        state: present
+
+##### Adding user
+
+    - name: add user
+      ansible.builtin.user:
+        name: "{{ final_user }}"
+        password: "{{ final_user_password }}"
+        state: present
+
+
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: latest
+
+##### PHP Installation
+
+    - name: add Php repository
+      script: ./php_prereq.sh
+
+    - name: install PHP
+      apt:
+        pkg:
+          - php7.4
+          - php7.4-bcmath
+          - php7.4-bz2
+          - php7.4-intl
+          - php7.4-gd
+          - php7.4-mbstring
+          - php7.4-mysql
+          - php7.4-zip
+          - php7.4-xml
+          - php7.4-curl
+          - php7.4-fpm
+        update_cache: yes
+
+##### Symfony Installation
+
+    - name: download symfony installation script
+      get_url: 
+        url: https://get.symfony.com/cli/installer
+        dest: /tmp/symfony_installer
+        mode: 0777
+      
+    - name: execute symfony installation script
+      shell: bash /tmp/symfony_installer
+
+##### Composer Setup
+
+    - name: download composer
+      get_url:
+        url: https://getcomposer.org/installer
+        dest: /tmp/installer
+
+    - name: install composer
+      shell: cat /tmp/installer | php -- --install-dir=/usr/local/bin
+      args: 
+        creates: /usr/local/bin/composer
+
+    - name: install composer globally
+      shell: mv /usr/local/bin/composer.phar /usr/local/bin/composer
+      args:
+        creates: /usr/local/bin/composer
+
+    - name: make composer executable
+      file: 
+        path: /usr/local/bin/composer
+        mode: a+x
+        state: file
+
+##### Code base importation and setup
+
+    - name: Create a directory for the code
+      file:
+        path: "{{ symfony_root_dir }}"
+        state: directory
+        owner: "{{ final_user }}"
+        group: "{{ final_user }}"
+        recurse: yes
+
+    - name: copy app files to target machine
+      copy:
+        src: ./symfony
+        dest: "{{ symfony_root_dir }}"
+        owner: "{{ final_user }}"
+        group: "{{ final_user }}"
+        mode: 0644
+
+    - name: Setup Composer dependencies
+      shell: "cd {{ symfony_root_dir }}/symfony/ && echo -e 'yes\n'|composer install"
+    
+    - name: make the console executable
+      file:
+        path: "{{ symfony_console_path }}/console"
+        mode: 1777
+
+    # - name: start symfony server
+    #  shell: cd /home/thiback/symfony/ && symfony server:start
+
+##### Install and configure MariaDB
+
+    - name: add MariaDB repository
+      apt:
+        name: mariadb-server
+        state: present
+
+    - name: Install python module
+      apt: 
+        name: python3-mysqldb
+        state: present
+
+    - name: Create readwrite user
+      mysql_user: 
+        name: "{{ db_user}}"
+        password: "{{ db_user_password }}"
+        priv: '*.*:ALL'
+        state: present
+    
+    - name: Create DB if not exists
+      command: '{{ symfony_console_path }}/console doctrine:database:create --if-not-exists'
+
+    - name: Create a migration folder
+      file:
+        path: "{{ symfony_root_dir }}/symfony/migrations/"
+        state: directory
+        owner: "{{ final_user }}"
+        group: "{{ final_user }}"
+        recurse: yes
+
+    - name: Generate migrations
+      command: '{{ symfony_console_path }}/console doctrine:migrations:diff'
+
+    - name: Execute migrations
+      command: "{{ symfony_console_path }}/console doctrine:migrations:migrate --no-interaction"
+
+##### Nginx setup
+
+    - name: Add Symfony config template to the Nginx available sites
+      template:
+        src: templates/symfony.conf
+        dest: "/etc/nginx/sites-available/symfony.conf"
+
+    - name: Enable Symfony config template from Nginx available sites
+      become: true
+      file:
+        src: "/etc/nginx/sites-available/symfony.conf"
+        dest: "/etc/nginx/sites-enabled/symfony.conf"
+        state: link
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+    - name: Restart PHP-FPM
+      service:
+        name: php7.4-fpm
+        state: restarted
+
+# symfony 4.23.5 composer 2.0.12 php 7.2.24
+#   - name: install httpd
+#     apt:
+#       pkg: httpd
+#   
+#   #- name: write the apache config file
+#   - name: start httpd
+#     service:
+#       name: httpd
+#       state: started

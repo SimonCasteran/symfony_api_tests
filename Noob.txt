@@ -1,0 +1,1 @@
+Nous avons passé la journée à lire de la doc assembleur en étudiant des binaires avce IDA. 3 challenges validés.
